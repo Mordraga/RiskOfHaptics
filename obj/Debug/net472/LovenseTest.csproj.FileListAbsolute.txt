@@ -7,3 +7,4 @@
 /home/mordraga/github/personal/lovense_testing/bin/Debug/net472/LovenseRoR2.pdb
 /home/mordraga/github/personal/lovense_testing/obj/Debug/net472/LovenseRoR2.dll
 /home/mordraga/github/personal/lovense_testing/obj/Debug/net472/LovenseRoR2.pdb
+/home/mordraga/github/personal/lovense_testing/obj/Debug/net472/LovenseTest.sourcelink.json

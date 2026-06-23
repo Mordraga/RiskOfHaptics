@@ -159,7 +159,7 @@ public class LovensePlugin : BaseUnityPlugin
         if (_killChainCount > 0 && Time.time > _killChainExpiry)
         {
             int   peakPos        = Mathf.Min(_killChainCount * 10, 100);
-            float taperDurationS = _killChainCount * KillChainWindow;
+            float taperDurationS = Mathf.Min(_killChainCount * KillChainWindow / 2f, 6f);
             int   taperDurationMs = Mathf.RoundToInt(taperDurationS * 1000f);
 
             _taperStartTime    = Time.time;
