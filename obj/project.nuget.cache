@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "J4TSuYyUwYMOPd+N7pnog/881+V3ByJ95P4lp872ZDSKvaR/wMZaqObm5F93+JyJvHSNMdqev9YHVFGLBpeH9A==",
+  "success": true,
+  "projectFilePath": "/home/mordraga/github/personal/lovense_testing/LovenseTest.csproj",
+  "expectedPackageFiles": [
+    "/home/mordraga/.nuget/packages/microsoft.netframework.referenceassemblies/1.0.3/microsoft.netframework.referenceassemblies.1.0.3.nupkg.sha512",
+    "/home/mordraga/.nuget/packages/microsoft.netframework.referenceassemblies.net472/1.0.3/microsoft.netframework.referenceassemblies.net472.1.0.3.nupkg.sha512"
+  ],
+  "logs": []
+}

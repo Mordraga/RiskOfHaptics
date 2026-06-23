@@ -1,0 +1,53 @@
+{
+  "format": 1,
+  "restore": {
+    "/home/mordraga/github/personal/lovense_testing/LovenseTest.csproj": {}
+  },
+  "projects": {
+    "/home/mordraga/github/personal/lovense_testing/LovenseTest.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "/home/mordraga/github/personal/lovense_testing/LovenseTest.csproj",
+        "projectName": "LovenseRoR2",
+        "projectPath": "/home/mordraga/github/personal/lovense_testing/LovenseTest.csproj",
+        "packagesPath": "/home/mordraga/.nuget/packages/",
+        "outputPath": "/home/mordraga/github/personal/lovense_testing/obj/",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "/home/mordraga/.nuget/NuGet/NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net472"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net472": {
+            "targetAlias": "net472",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        }
+      },
+      "frameworks": {
+        "net472": {
+          "targetAlias": "net472",
+          "dependencies": {
+            "Microsoft.NETFramework.ReferenceAssemblies": {
+              "suppressParent": "All",
+              "target": "Package",
+              "version": "[1.0.3, )",
+              "autoReferenced": true
+            }
+          },
+          "runtimeIdentifierGraphPath": "/usr/lib/dotnet/sdk/8.0.127/RuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}

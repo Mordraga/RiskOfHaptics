@@ -1,0 +1,5 @@
+is_global = true
+build_property.RootNamespace = LovenseTest
+build_property.ProjectDir = /home/mordraga/github/personal/lovense_testing/
+build_property.EnableComHosting = 
+build_property.EnableGeneratedComInterfaceComImportInterop = 

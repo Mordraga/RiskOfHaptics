@@ -1,0 +1,14 @@
+/home/mordraga/github/personal/lovense_testing/bin/Debug/net8.0/LovenseTest
+/home/mordraga/github/personal/lovense_testing/bin/Debug/net8.0/LovenseTest.deps.json
+/home/mordraga/github/personal/lovense_testing/bin/Debug/net8.0/LovenseTest.runtimeconfig.json
+/home/mordraga/github/personal/lovense_testing/bin/Debug/net8.0/LovenseTest.dll
+/home/mordraga/github/personal/lovense_testing/bin/Debug/net8.0/LovenseTest.pdb
+/home/mordraga/github/personal/lovense_testing/obj/Debug/net8.0/LovenseTest.GeneratedMSBuildEditorConfig.editorconfig
+/home/mordraga/github/personal/lovense_testing/obj/Debug/net8.0/LovenseTest.AssemblyInfoInputs.cache
+/home/mordraga/github/personal/lovense_testing/obj/Debug/net8.0/LovenseTest.AssemblyInfo.cs
+/home/mordraga/github/personal/lovense_testing/obj/Debug/net8.0/LovenseTest.csproj.CoreCompileInputs.cache
+/home/mordraga/github/personal/lovense_testing/obj/Debug/net8.0/LovenseTest.dll
+/home/mordraga/github/personal/lovense_testing/obj/Debug/net8.0/refint/LovenseTest.dll
+/home/mordraga/github/personal/lovense_testing/obj/Debug/net8.0/LovenseTest.pdb
+/home/mordraga/github/personal/lovense_testing/obj/Debug/net8.0/LovenseTest.genruntimeconfig.cache
+/home/mordraga/github/personal/lovense_testing/obj/Debug/net8.0/ref/LovenseTest.dll
