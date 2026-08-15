@@ -1,13 +1,10 @@
 using BepInEx;
-using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
 using Newtonsoft.Json.Linq;
-using RiskOfOptions;
-using RiskOfOptions.OptionConfigs;
-using RiskOfOptions.Options;
 using RoR2;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
@@ -26,55 +23,29 @@ public class LovensePlugin : BaseUnityPlugin
 
     internal static new ManualLogSource Logger = null!;
     internal static string? ToyId;
+    internal static string? ToyId2;
 
-    // Vibration sources — 0-20 scale, combined each frame
     internal static float DamageSource;
     internal static float DeathSource;
-
-    // Current intensity exposed for overlay
-    internal static int CurrentPercent;
-
-    private int   _lastSentIntensity = -1;
-    private bool  _wasAlive;
-
     internal static float KillChainSource;
+    internal static int   CurrentPercent;
+
+    private static int   _lastSentIntensity = -1;
+    private static float _lastSendTime      = 0f;
+    private static bool  _wasAlive;
 
     private static int   _killChainCount;
     private static float _killChainExpiry;
     private static float _patternEndTime    = -1f;
     private static float _taperStartTime;
     private static int   _taperStartPercent;
-    private const  float KillChainWindow = 3f;
+
+    private static string BaseUrl = "";
 
     private static readonly HttpClient Http = null!;
-    private static string BaseUrl = "";
 
     private const float DamageDecay = 15f;
     private const float DeathDecay  =  4f;
-
-    // ── Config ────────────────────────────────────────────────────────────────
-    private static ConfigEntry<string> _cfgIp          = null!;
-    private static ConfigEntry<int>    _cfgPort        = null!;
-    private static ConfigEntry<bool>   _cfgAutoConnect = null!;
-
-    // Display
-    private static ConfigEntry<bool> _cfgShowOverlay = null!;
-
-    // Feature toggles
-    private static ConfigEntry<bool> _cfgEnableDamage     = null!;
-    private static ConfigEntry<bool> _cfgEnableKillChain  = null!;
-    private static ConfigEntry<bool> _cfgEnableLowHealth  = null!;
-    private static ConfigEntry<bool> _cfgEnableTeleporter = null!;
-    private static ConfigEntry<bool> _cfgEnableDeath      = null!;
-    private static ConfigEntry<bool> _cfgEnableDiffScale  = null!;
-
-    // Intensity multipliers
-    private static ConfigEntry<float> _cfgMultGlobal     = null!;
-    private static ConfigEntry<float> _cfgMultDamage     = null!;
-    private static ConfigEntry<float> _cfgMultKillChain  = null!;
-    private static ConfigEntry<float> _cfgMultLowHealth  = null!;
-    private static ConfigEntry<float> _cfgMultTeleporter = null!;
-    private static ConfigEntry<float> _cfgMultDeath      = null!;
 
     static LovensePlugin()
     {
@@ -88,62 +59,19 @@ public class LovensePlugin : BaseUnityPlugin
     {
         Logger = base.Logger;
 
-        // Connection
-        _cfgIp          = Config.Bind("Connection", "IP",          "192.168.1.4", "Lovense Connect Game Mode IP address");
-        _cfgPort        = Config.Bind("Connection", "Port",         30010,         "Lovense Connect Game Mode port");
-        _cfgAutoConnect = Config.Bind("Connection", "Auto-Connect", false,         "Automatically connect on game launch");
-        BaseUrl         = $"https://{_cfgIp.Value}:{_cfgPort.Value}/command";
-        _cfgIp.SettingChanged   += (_, _) => BaseUrl = $"https://{_cfgIp.Value}:{_cfgPort.Value}/command";
-        _cfgPort.SettingChanged += (_, _) => BaseUrl = $"https://{_cfgIp.Value}:{_cfgPort.Value}/command";
+        PluginConfig.Initialize(Config);
+        HapticOverlay.Initialize();
 
-        // Display
-        _cfgShowOverlay = Config.Bind("Display", "Show Intensity Overlay", true, "Show current intensity % on screen");
-
-        // Feature toggles
-        _cfgEnableDamage     = Config.Bind("Features", "Damage",              true, "Vibrate on taking damage");
-        _cfgEnableKillChain  = Config.Bind("Features", "Kill Chain",          true, "Vibrate on kills (chains with rapid kills)");
-        _cfgEnableLowHealth  = Config.Bind("Features", "Low Health Hum",      true, "Hum when below 25% HP");
-        _cfgEnableTeleporter = Config.Bind("Features", "Teleporter Charge",   true, "Ramp up during teleporter charge");
-        _cfgEnableDeath      = Config.Bind("Features", "Death Burst",         true, "Max burst on death");
-        _cfgEnableDiffScale  = Config.Bind("Features", "Difficulty Scaling",  true, "Scale intensity with difficulty coefficient");
-
-        // Multipliers
-        var multCfg = new SliderConfig { min = 0f, max = 2f, FormatString = "{0:0.0}x" };
-        _cfgMultGlobal     = Config.Bind("Intensity", "Global Multiplier",     1.0f, "Overall intensity scale");
-        _cfgMultDamage     = Config.Bind("Intensity", "Damage Multiplier",     1.0f, "Damage haptic intensity");
-        _cfgMultKillChain  = Config.Bind("Intensity", "Kill Chain Multiplier", 1.0f, "Kill chain haptic intensity");
-        _cfgMultLowHealth  = Config.Bind("Intensity", "Low Health Multiplier", 1.0f, "Low health hum intensity");
-        _cfgMultTeleporter = Config.Bind("Intensity", "Teleporter Multiplier", 1.0f, "Teleporter charge intensity");
-        _cfgMultDeath      = Config.Bind("Intensity", "Death Multiplier",      1.0f, "Death burst intensity");
-
-        // RiskOfOptions — Connection
-        ModSettingsManager.AddOption(new StringInputFieldOption(_cfgIp));
-        ModSettingsManager.AddOption(new IntSliderOption(_cfgPort, new IntSliderConfig { min = 1024, max = 65535 }));
-        ModSettingsManager.AddOption(new CheckBoxOption(_cfgAutoConnect));
-        ModSettingsManager.AddOption(new GenericButtonOption("Connect",    "Connection", "Connect to the toy", "Connect",    Connect));
-        ModSettingsManager.AddOption(new GenericButtonOption("Disconnect", "Connection", "Disconnect the toy", "Disconnect", Disconnect));
-
-        // RiskOfOptions — Display
-        ModSettingsManager.AddOption(new CheckBoxOption(_cfgShowOverlay));
-
-        // RiskOfOptions — Features
-        ModSettingsManager.AddOption(new CheckBoxOption(_cfgEnableDamage));
-        ModSettingsManager.AddOption(new CheckBoxOption(_cfgEnableKillChain));
-        ModSettingsManager.AddOption(new CheckBoxOption(_cfgEnableLowHealth));
-        ModSettingsManager.AddOption(new CheckBoxOption(_cfgEnableTeleporter));
-        ModSettingsManager.AddOption(new CheckBoxOption(_cfgEnableDeath));
-        ModSettingsManager.AddOption(new CheckBoxOption(_cfgEnableDiffScale));
-
-        // RiskOfOptions — Multipliers
-        ModSettingsManager.AddOption(new SliderOption(_cfgMultGlobal,     multCfg));
-        ModSettingsManager.AddOption(new SliderOption(_cfgMultDamage,     multCfg));
-        ModSettingsManager.AddOption(new SliderOption(_cfgMultKillChain,  multCfg));
-        ModSettingsManager.AddOption(new SliderOption(_cfgMultLowHealth,  multCfg));
-        ModSettingsManager.AddOption(new SliderOption(_cfgMultTeleporter, multCfg));
-        ModSettingsManager.AddOption(new SliderOption(_cfgMultDeath,      multCfg));
+        BaseUrl = $"https://{PluginConfig.Ip.Value}:{PluginConfig.Port.Value}/command";
+        PluginConfig.Ip.SettingChanged   += (_, _) => BaseUrl = $"https://{PluginConfig.Ip.Value}:{PluginConfig.Port.Value}/command";
+        PluginConfig.Port.SettingChanged += (_, _) => BaseUrl = $"https://{PluginConfig.Ip.Value}:{PluginConfig.Port.Value}/command";
 
         new Harmony(PluginGUID).PatchAll();
-        if (_cfgAutoConnect.Value) _ = InitAsync();
+
+        TeleporterInteraction.onTeleporterBeginChargingGlobal += OnBossEngageGlobal;
+        Run.onServerGameOver += OnGameOverGlobal;
+
+        if (PluginConfig.AutoConnect.Value) _ = InitAsync();
     }
 
     private void Update()
@@ -155,22 +83,20 @@ public class LovensePlugin : BaseUnityPlugin
         DamageSource = Mathf.Max(0, DamageSource - dt * DamageDecay);
         DeathSource  = Mathf.Max(0, DeathSource  - dt * DeathDecay);
 
-        // when chain expires, fire a PatternV2 taper lasting the same duration as the chain
+        if (Input.GetKeyDown(KeyCode.Escape) && ToyId != null)
+        {
+            ResetSources();
+            _ = SendStop(AllConnectedToys());
+        }
+
+        // when chain expires fire a PatternV2 taper, duration = half chain time, capped
         if (_killChainCount > 0 && Time.time > _killChainExpiry)
         {
-            int   peakPos        = Mathf.Min(_killChainCount * 10, 100);
-            float taperDurationS = Mathf.Min(_killChainCount * KillChainWindow / 2f, 6f);
-            int   taperDurationMs = Mathf.RoundToInt(taperDurationS * 1000f);
+            float rampDivisor = Mathf.Max(PluginConfig.KillsToMax.Value - 1, 1);
+            int   peakPos     = Mathf.RoundToInt(Mathf.Clamp(Mathf.Pow(100f, (_killChainCount - 1f) / rampDivisor), 0f, 100f));
+            float taperDurationS = Mathf.Min(_killChainCount * PluginConfig.KillChainWindow.Value / 2f, PluginConfig.TaperCap.Value);
 
-            _taperStartTime    = Time.time;
-            _taperStartPercent = peakPos;
-            _patternEndTime    = Time.time + taperDurationS;
-
-            _ = TrySendPatternV2(new object[]
-            {
-                new { ts = 0,              pos = peakPos },
-                new { ts = taperDurationMs, pos = 0 },
-            });
+            PlayBurst(peakPos, taperDurationS);
 
             _killChainCount = 0;
             KillChainSource = 0f;
@@ -178,28 +104,72 @@ public class LovensePlugin : BaseUnityPlugin
 
         float lowHealthSource = 0f;
         float teleSource      = 0f;
+        float eliteSource     = 0f;
+        float crowdSource     = 0f;
 
         if (Run.instance != null)
         {
             var localBody = LocalUserManager.GetFirstLocalUser()?.cachedBody;
 
             bool isAlive = localBody != null && localBody.healthComponent?.alive == true;
-            if (_wasAlive && !isAlive && _cfgEnableDeath.Value)
-                DeathSource = 20f * _cfgMultDeath.Value;
+            if (_wasAlive && !isAlive && PluginConfig.EnableDeath.Value)
+            {
+                DeathSource      = 20f * PluginConfig.MultDeath.Value;
+                _killChainCount  = 0;
+                KillChainSource  = 0f;
+                _killChainExpiry = 0f;
+            }
             _wasAlive = isAlive;
 
-            if (_cfgEnableLowHealth.Value && localBody?.healthComponent != null)
+            if (PluginConfig.EnableLowHealth.Value && localBody?.healthComponent != null)
             {
-                float hpFrac = localBody.healthComponent.combinedHealthFraction;
-                if (hpFrac < 0.25f)
-                    lowHealthSource = Mathf.Lerp(0f, 8f, 1f - hpFrac / 0.25f) * _cfgMultLowHealth.Value;
+                float hpFrac    = localBody.healthComponent.combinedHealthFraction;
+                float threshold = PluginConfig.LowHealthThreshold.Value;
+                if (hpFrac < threshold)
+                {
+                    float urgency = 1f - hpFrac / threshold;
+                    float period  = Mathf.Lerp(PluginConfig.HeartbeatSlowPeriod.Value, PluginConfig.HeartbeatFastPeriod.Value, urgency);
+                    float phase   = (Time.time % period) / period;
+                    float beat    = Mathf.Max(PulseAt(phase, 0f, 0.12f), PulseAt(phase, 0.22f, 0.10f) * 0.7f);
+                    lowHealthSource = beat * Mathf.Lerp(6f, 14f, urgency) * PluginConfig.MultLowHealth.Value;
+                }
             }
 
-            if (_cfgEnableTeleporter.Value)
+            if (PluginConfig.EnableTeleporter.Value)
             {
                 var tele = TeleporterInteraction.instance;
                 if (tele != null && !tele.isCharged && tele.chargeFraction > 0f)
-                    teleSource = tele.chargeFraction * 15f * _cfgMultTeleporter.Value;
+                    teleSource = tele.chargeFraction * 15f * PluginConfig.MultTeleporter.Value;
+            }
+
+            if (localBody != null && (PluginConfig.EnableEliteProximity.Value || PluginConfig.EnableCrowdPanic.Value))
+            {
+                Vector3 playerPos       = localBody.corePosition;
+                float   eliteRadius     = PluginConfig.EliteProximityRadius.Value;
+                float   crowdRadius     = PluginConfig.CrowdPanicRadius.Value;
+                float   nearestEliteDist = float.MaxValue;
+                int     enemyCount       = 0;
+
+                foreach (var body in CharacterBody.readOnlyInstancesList)
+                {
+                    if (body == null || body == localBody) continue;
+                    if (body.teamComponent == null || body.teamComponent.teamIndex == TeamIndex.Player) continue;
+                    if (body.healthComponent == null || !body.healthComponent.alive) continue;
+
+                    float dist = Vector3.Distance(playerPos, body.corePosition);
+
+                    if (PluginConfig.EnableEliteProximity.Value && body.isElite && dist < nearestEliteDist)
+                        nearestEliteDist = dist;
+
+                    if (PluginConfig.EnableCrowdPanic.Value && !body.isBoss && dist < crowdRadius)
+                        enemyCount++;
+                }
+
+                if (PluginConfig.EnableEliteProximity.Value && nearestEliteDist < eliteRadius)
+                    eliteSource = Mathf.Lerp(12f, 0f, nearestEliteDist / eliteRadius) * PluginConfig.MultElite.Value;
+
+                if (PluginConfig.EnableCrowdPanic.Value && enemyCount > 0)
+                    crowdSource = Mathf.Min(enemyCount * 2f, 12f) * PluginConfig.MultCrowdPanic.Value;
             }
         }
         else
@@ -207,7 +177,7 @@ public class LovensePlugin : BaseUnityPlugin
             _wasAlive = false;
         }
 
-        float diffScale = (_cfgEnableDiffScale.Value && Run.instance != null)
+        float diffScale = (PluginConfig.EnableDiffScale.Value && Run.instance != null)
             ? 1f + Mathf.Log(Mathf.Max(1f, Run.instance.difficultyCoefficient)) * 0.2f
             : 1f;
 
@@ -223,69 +193,153 @@ public class LovensePlugin : BaseUnityPlugin
             _lastSentIntensity = -1;
         }
 
-        float damage    = _cfgEnableDamage.Value    ? DamageSource    * _cfgMultDamage.Value    : 0f;
-        float death     = _cfgEnableDeath.Value     ? DeathSource                               : 0f;
-        float killChain = _cfgEnableKillChain.Value ? KillChainSource * _cfgMultKillChain.Value : 0f;
+        float damage    = PluginConfig.EnableDamage.Value    ? DamageSource    * PluginConfig.MultDamage.Value    : 0f;
+        float death     = PluginConfig.EnableDeath.Value     ? DeathSource                                        : 0f;
+        float killChain = PluginConfig.EnableKillChain.Value ? KillChainSource * PluginConfig.MultKillChain.Value : 0f;
 
         int intensity = Mathf.RoundToInt(
-            Mathf.Clamp((damage + death + killChain + lowHealthSource + teleSource) * diffScale * _cfgMultGlobal.Value, 0f, 20f)
+            Mathf.Clamp((damage + death + killChain + lowHealthSource + teleSource + eliteSource + crowdSource) * diffScale * PluginConfig.MultGlobal.Value, 0f, 20f)
         );
 
         CurrentPercent = Mathf.RoundToInt(intensity / 20f * 100f);
 
-        if (intensity != _lastSentIntensity)
+        // Fansly: short-lived commands (timeSec=2) + resend every 1.5s lets tips naturally override
+        bool commandExpiring = Time.time - _lastSendTime > 1.5f;
+        if (intensity != _lastSentIntensity || commandExpiring)
         {
             _lastSentIntensity = intensity;
-            _ = TrySendVibrate(intensity);
+            _lastSendTime      = Time.time;
+            _ = TrySendVibrate(intensity, ResolveToys(PluginConfig.ContinuousToyTarget.Value));
         }
     }
 
-    private void OnGUI()
+    private static float PulseAt(float phase, float start, float width)
     {
-        if (!_cfgShowOverlay.Value || ToyId == null) return;
-        GUI.Label(new Rect(10, 10, 160, 24), $"Lovense: {CurrentPercent}%");
+        float d = Mathf.Abs(phase - start);
+        d = Mathf.Min(d, 1f - d);
+        return d < width ? 1f - d / width : 0f;
     }
+
+    private void OnGUI() => HapticOverlay.Draw();
 
     internal static void OnDamage(float damage, float maxHp, bool isDot)
     {
-        if (!_cfgEnableDamage.Value) return;
+        if (!PluginConfig.EnableDamage.Value) return;
         float add = Mathf.Clamp01(damage / maxHp) * 20f;
         DamageSource = Mathf.Clamp(DamageSource + (isDot ? add * 0.4f : add), 0f, 20f);
     }
 
     internal static void OnKill()
     {
-        if (ToyId == null || !_cfgEnableKillChain.Value) return;
+        if (ToyId == null || !PluginConfig.EnableKillChain.Value) return;
 
         if (Time.time > _killChainExpiry)
         {
             _killChainCount  = 0;
-            _killChainExpiry = Time.time; // normalize so +=  starts from now
+            _killChainExpiry = Time.time;
         }
 
         _killChainCount++;
-        _killChainExpiry += KillChainWindow; // each kill adds 3s (4 kills = 12s total)
+        _killChainExpiry += PluginConfig.KillChainWindow.Value;
 
-        // +10% per kill, caps at 100% (kill 10); holds for KillChainWindow seconds
-        KillChainSource = Mathf.Min(_killChainCount * 2f, 20f);
+        float rampDivisor = Mathf.Max(PluginConfig.KillsToMax.Value - 1, 1);
+        KillChainSource = Mathf.Min(Mathf.Pow(100f, (_killChainCount - 1) / rampDivisor) * 0.2f, 20f);
     }
 
-    private static void Connect() => _ = InitAsync();
-
-    private static void Disconnect()
+    internal static void ResetSources()
     {
-        ToyId = null;
         DamageSource = DeathSource = KillChainSource = 0f;
-        _killChainCount = 0;
-        _patternEndTime = -1f;
-        CurrentPercent  = 0;
+        _killChainCount    = 0;
+        _killChainExpiry   = 0f;
+        _patternEndTime    = -1f;
+        _lastSentIntensity = -1;
+        _lastSendTime      = 0f;
+        CurrentPercent     = 0;
+    }
+
+    internal static void Connect() => _ = InitAsync();
+
+    internal static void Disconnect()
+    {
+        ToyId  = null;
+        ToyId2 = null;
+        DamageSource = DeathSource = KillChainSource = 0f;
+        _killChainCount    = 0;
+        _killChainExpiry   = 0f;
+        _patternEndTime    = -1f;
+        _lastSentIntensity = -1;
+        _lastSendTime      = 0f;
+        CurrentPercent     = 0;
         Logger.LogInfo("Lovense disconnected.");
+    }
+
+    internal static void OnItemPickup(ItemTier tier)
+    {
+        if (ToyId == null || !PluginConfig.EnableItemPickup.Value) return;
+
+        float basePeak = tier switch
+        {
+            ItemTier.Tier1 or ItemTier.VoidTier1                                     => 15f,
+            ItemTier.Tier2 or ItemTier.VoidTier2                                     => 30f,
+            ItemTier.Tier3 or ItemTier.VoidTier3 or ItemTier.Boss or ItemTier.VoidBoss => 55f,
+            ItemTier.Lunar                                                            => 45f,
+            _                                                                         => 0f,
+        };
+        if (basePeak <= 0f) return;
+
+        int peak = Mathf.RoundToInt(Mathf.Clamp(basePeak * PluginConfig.MultItemPickup.Value, 0f, 100f));
+        PlayBurst(peak, 0.6f);
+    }
+
+    private static void OnBossEngageGlobal(TeleporterInteraction _)
+    {
+        if (ToyId == null || !PluginConfig.EnableBossEngage.Value) return;
+        int peak = Mathf.RoundToInt(Mathf.Clamp(60f * PluginConfig.MultBossEngage.Value, 0f, 100f));
+        PlayBurst(peak, 2.5f);
+    }
+
+    private static void OnGameOverGlobal(Run run, GameEndingDef ending)
+    {
+        if (ToyId == null || !PluginConfig.EnableVictory.Value || !ending.isWin) return;
+        int peak = Mathf.RoundToInt(Mathf.Clamp(90f * PluginConfig.MultVictory.Value, 0f, 100f));
+        PlayBurst(peak, 4f);
+    }
+
+    private static void PlayBurst(int peakPercent, float durationS)
+    {
+        int taperMs = Mathf.RoundToInt(durationS * 1000f);
+
+        _taperStartTime    = Time.time;
+        _taperStartPercent = peakPercent;
+        _patternEndTime    = Time.time + durationS;
+
+        _ = TrySendPatternV2(new object[]
+        {
+            new { ts = 0,       pos = peakPercent },
+            new { ts = taperMs, pos = 0 },
+        }, ResolveToys(PluginConfig.EventToyTarget.Value));
+    }
+
+    private static IEnumerable<string> ResolveToys(ToyTarget target)
+    {
+        if (target == ToyTarget.Toy2 && ToyId2 != null) { yield return ToyId2; yield break; }
+        if (target == ToyTarget.Both)
+        {
+            if (ToyId  != null) yield return ToyId;
+            if (ToyId2 != null) yield return ToyId2;
+            yield break;
+        }
+        if (ToyId != null) yield return ToyId;
+    }
+
+    private static IEnumerable<string> AllConnectedToys()
+    {
+        if (ToyId  != null) yield return ToyId;
+        if (ToyId2 != null) yield return ToyId2;
     }
 
     private static async Task InitAsync()
     {
-        // Block Update from sending Vibrate:0 during the connection ramp.
-        // Must be set before the first await while we're still on the main thread.
         _patternEndTime = Time.time + 1.1f;
         try
         {
@@ -293,17 +347,23 @@ public class LovensePlugin : BaseUnityPlugin
             var toysStr = resp["data"]?["toys"]?.ToString();
             if (toysStr == null)
             {
+                _patternEndTime = -1f;
                 Logger.LogError($"Lovense init failed: unexpected response: {resp}");
                 return;
             }
             var toys = JObject.Parse(toysStr);
-            if (!toys.Properties().Any())
+            var toyNames = toys.Properties().Select(p => p.Name).ToList();
+            if (toyNames.Count == 0)
             {
+                _patternEndTime = -1f;
                 Logger.LogWarning("Lovense: no toys found. Is the toy connected?");
                 return;
             }
-            ToyId = toys.Properties().First().Name;
-            Logger.LogInfo($"Lovense connected: {ToyId}");
+            ToyId  = toyNames[0];
+            ToyId2 = toyNames.Count > 1 ? toyNames[1] : null;
+            Logger.LogInfo(ToyId2 != null
+                ? $"Lovense connected: {ToyId} (Toy 1), {ToyId2} (Toy 2)"
+                : $"Lovense connected: {ToyId}");
 
             await TrySendPatternV2(new object[]
             {
@@ -312,7 +372,7 @@ public class LovensePlugin : BaseUnityPlugin
                 new { ts = 400, pos =  60 },
                 new { ts = 600, pos = 100 },
                 new { ts = 900, pos =   0 },
-            });
+            }, AllConnectedToys());
         }
         catch (HttpRequestException e)
         {
@@ -326,24 +386,43 @@ public class LovensePlugin : BaseUnityPlugin
         }
     }
 
-    internal static async Task TrySendPatternV2(object[] actions)
+    internal static async Task TrySendPatternV2(object[] actions, IEnumerable<string> toys)
     {
-        try
+        foreach (var toy in toys)
         {
-            await SendCommand(new { command = "PatternV2", type = "Setup", actions, apiVer = 1 });
-            await SendCommand(new { command = "PatternV2", type = "Play",  apiVer = 1 });
+            try
+            {
+                await SendCommand(new { toy, command = "PatternV2", type = "Setup", actions, apiVer = 1 });
+                await SendCommand(new { toy, command = "PatternV2", type = "Play",  apiVer = 1 });
+            }
+            catch (Exception e) { Logger.LogError($"Lovense PatternV2 failed: {e}"); }
         }
-        catch (Exception e) { Logger.LogError($"Lovense PatternV2 failed: {e}"); }
     }
 
-    private static async Task TrySendVibrate(int intensity)
+    private static async Task TrySendVibrate(int intensity, IEnumerable<string> toys)
     {
-        try { await SendCommand(new
+        foreach (var toy in toys)
         {
-            toy = ToyId, command = "Function", action = $"Vibrate:{intensity}",
-            timeSec = 0, loopRunningSec = 0, loopPauseSec = 0, apiVer = 1
-        }); }
-        catch (Exception e) { Logger.LogWarning($"Lovense vibrate failed: {e.Message}"); }
+            try { await SendCommand(new
+            {
+                toy, command = "Function", action = $"Vibrate:{intensity}",
+                timeSec = 2, loopRunningSec = 0, loopPauseSec = 0, apiVer = 1
+            }); }
+            catch (Exception e) { Logger.LogWarning($"Lovense vibrate failed: {e.Message}"); }
+        }
+    }
+
+    private static async Task SendStop(IEnumerable<string> toys)
+    {
+        foreach (var toy in toys)
+        {
+            try { await SendCommand(new
+            {
+                toy, command = "Function", action = "Vibrate:0",
+                timeSec = 0, loopRunningSec = 0, loopPauseSec = 0, apiVer = 1
+            }); }
+            catch { }
+        }
     }
 
     private static async Task<JObject> SendCommand(object payload)
@@ -353,31 +432,5 @@ public class LovensePlugin : BaseUnityPlugin
         var result  = await Http.PostAsync(BaseUrl, content);
         var body    = await result.Content.ReadAsStringAsync();
         return JObject.Parse(body);
-    }
-}
-
-[HarmonyPatch(typeof(HealthComponent), nameof(HealthComponent.TakeDamage))]
-class PatchTakeDamage
-{
-    static void Postfix(HealthComponent __instance, DamageInfo damageInfo)
-    {
-        var localUser = LocalUserManager.GetFirstLocalUser();
-        if (localUser?.cachedBody != __instance.body) return;
-
-        bool isDot = damageInfo.dotIndex != DotController.DotIndex.None;
-        LovensePlugin.OnDamage(damageInfo.damage, __instance.fullCombinedHealth, isDot);
-    }
-}
-
-[HarmonyPatch(typeof(GlobalEventManager), nameof(GlobalEventManager.OnCharacterDeath))]
-class PatchOnKill
-{
-    static void Postfix(DamageReport damageReport)
-    {
-        if (damageReport == null) return;
-        if (damageReport.attackerTeamIndex != TeamIndex.Player) return;
-        if (damageReport.victimTeamIndex   == TeamIndex.Player) return;
-
-        LovensePlugin.OnKill();
     }
 }

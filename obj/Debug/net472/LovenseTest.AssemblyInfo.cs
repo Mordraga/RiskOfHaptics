@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("LovenseRoR2")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+648b3893aa04b78daccf73d62b8f8f699514012c")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3d129c6eb70328cadc59b6d9e2032ae31178c638")]
 [assembly: System.Reflection.AssemblyProductAttribute("LovenseRoR2")]
 [assembly: System.Reflection.AssemblyTitleAttribute("LovenseRoR2")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
