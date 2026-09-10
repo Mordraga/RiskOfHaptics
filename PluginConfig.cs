@@ -170,7 +170,7 @@ internal static class PluginConfig
         KillsToMax     = config.Bind("Intensity", "Kill Chain Ramp (kills to 100%)", 15,  "How many kills in a chain to reach 100% intensity");
 
         LowHealthThreshold   = config.Bind("Tuning", "Low Health Threshold", 0.25f, "HP fraction below which the heartbeat activates (0.0 - 1.0)");
-        KillChainWindow      = config.Bind("Tuning", "Kill Chain Window (seconds)", 2f, "Time between kills to maintain a chain");
+        KillChainWindow      = config.Bind("Tuning", "Kill Chain Window (seconds)", 2f, "Seconds added to the current chain deadline by each kill; rapid kills bank extra time");
         TaperCap             = config.Bind("Tuning", "Kill Chain Taper Cap (seconds)", 4f, "Maximum duration of the kill chain taper pattern");
         EliteProximityRadius = config.Bind("Tuning", "Elite Proximity Radius (m)", 30f, "Distance at which a nearby elite starts to register");
         CrowdPanicRadius     = config.Bind("Tuning", "Crowd Panic Radius (m)", 15f, "Distance within which enemies count toward the crowd panic meter");
@@ -181,7 +181,7 @@ internal static class PluginConfig
         OverlayY = config.Bind("Overlay", "Position Y", 10, "Vertical position of the intensity overlay");
 
         ContinuousToyTarget = config.Bind("Toy Routing", "Continuous Signal Toy", ToyTarget.Toy1,
-            "Which toy receives the continuous signal (damage, death, heartbeat, teleporter, elite proximity, crowd panic). Falls back to Toy 1 if the chosen toy isn't connected.");
+            "Which toy receives damage, death, active kill chains, heartbeat, teleporter, elite proximity, and crowd panic. Each toy selects its own highest-priority effect. Falls back to Toy 1 if the chosen toy isn't connected.");
         EventToyTarget = config.Bind("Toy Routing", "Event Pattern Toy", ToyTarget.Toy1,
             "Which toy receives one-shot event patterns (kill chain taper, boss engage, item pickup, victory). Falls back to Toy 1 if the chosen toy isn't connected.");
 
@@ -209,6 +209,7 @@ internal static class PluginConfig
         CustomHeartbeatFastPeriod  = config.Bind("Presets", "Custom.HeartbeatFastPeriod", NormalValues.HeartbeatFastPeriod, new ConfigDescription("", null, "HideFromConfigManager"));
 
         RegisterOptions(multCfg);
+        HapticSettings.Initialize(config);
 
         MultGlobal.SettingChanged           += MarkCustom;
         MultDamage.SettingChanged           += MarkCustom;

@@ -17,38 +17,40 @@ namespace LovenseRoR2;
 [BepInDependency("com.rune580.riskofoptions")]
 public class LovensePlugin : BaseUnityPlugin
 {
-    public const string PluginGUID    = "com.mordraga.lovenserisk";
-    public const string PluginName    = "LovenseRoR2";
-    public const string PluginVersion = "1.0.0";
+    public const string PluginGUID = "com.mordraga.lovenserisk";
+    public const string PluginName = "LovenseRoR2";
+    public const string PluginVersion = "1.1.3";
 
     internal static new ManualLogSource Logger = null!;
     internal static string? ToyId;
     internal static string? ToyId2;
-
-    internal static float DamageSource;
-    internal static float DeathSource;
-    internal static float KillChainSource;
-    internal static int   CurrentPercent;
-
-    private static int   _lastSentIntensity = -1;
-    private static float _lastSendTime      = 0f;
-    private static bool  _wasAlive;
-
-    private static int   _killChainCount;
+    internal static bool Paused;
+    internal static string ConnectionStatus = "Disconnected";
+    internal static readonly int[] DevicePercent = new int[2];
+    private static readonly HapticEngine[] Engines = { new HapticEngine(), new HapticEngine() };
+    private static readonly Dictionary<string, HapticOutput> Outputs = new();
+    private static Task _stopTask = Task.CompletedTask;
+    private static bool _connectionBusy;
+    private static int _connectionVersion;
+    private static float _damageSource;
+    private static bool _wasAlive;
+    private static int _killChainCount;
     private static float _killChainExpiry;
-    private static float _patternEndTime    = -1f;
-    private static float _taperStartTime;
-    private static int   _taperStartPercent;
-
+    private static float _killChainSource;
     private static string BaseUrl = "";
-
-    private static readonly HttpClient Http = null!;
-
-    private const float DamageDecay = 15f;
-    private const float DeathDecay  =  4f;
+    private static readonly HttpClient Http;
+    private Harmony? _harmony;
+    private static bool CanPlay => !Paused && !_connectionBusy && _stopTask.IsCompleted
+        && (ToyId != null || HapticSettings.PreviewOnly.Value);
+    private static float Now => Time.unscaledTime;
+    private static float OutputScale => PluginConfig.MultGlobal.Value *
+        (PluginConfig.EnableDiffScale.Value && Run.instance != null
+            ? 1 + Mathf.Log(Mathf.Max(1, Run.instance.difficultyCoefficient)) * 0.2f : 1);
 
     static LovensePlugin()
     {
+        // Preserve the original working transport setup. The game's bundled Mono
+        // HttpClient handler does not forward its per-handler certificate callback.
         System.Net.ServicePointManager.ServerCertificateValidationCallback = (_, _, _, _) => true;
         var http = new HttpClient();
         http.DefaultRequestHeaders.Add("X-platform", "LovenseRoR2");
@@ -58,379 +60,293 @@ public class LovensePlugin : BaseUnityPlugin
     private void Awake()
     {
         Logger = base.Logger;
-
         PluginConfig.Initialize(Config);
         HapticOverlay.Initialize();
-
-        BaseUrl = $"https://{PluginConfig.Ip.Value}:{PluginConfig.Port.Value}/command";
-        PluginConfig.Ip.SettingChanged   += (_, _) => BaseUrl = $"https://{PluginConfig.Ip.Value}:{PluginConfig.Port.Value}/command";
-        PluginConfig.Port.SettingChanged += (_, _) => BaseUrl = $"https://{PluginConfig.Ip.Value}:{PluginConfig.Port.Value}/command";
-
-        new Harmony(PluginGUID).PatchAll();
-
+        BaseUrl = Endpoint();
+        PluginConfig.Ip.SettingChanged += (_, _) => EndpointChanged();
+        PluginConfig.Port.SettingChanged += (_, _) => EndpointChanged();
+        PluginConfig.ContinuousToyTarget.SettingChanged += (_, _) => StopAndReset();
+        PluginConfig.EventToyTarget.SettingChanged += (_, _) => StopAndReset();
+        _harmony = new Harmony(PluginGUID);
+        _harmony.PatchAll();
         TeleporterInteraction.onTeleporterBeginChargingGlobal += OnBossEngageGlobal;
         Run.onServerGameOver += OnGameOverGlobal;
+        if (PluginConfig.AutoConnect.Value) Connect();
+    }
 
-        if (PluginConfig.AutoConnect.Value) _ = InitAsync();
+    private static string Endpoint() => $"https://{PluginConfig.Ip.Value}:{PluginConfig.Port.Value}/command";
+    private static void EndpointChanged()
+    {
+        Disconnect(); // Existing outputs retain the old endpoint for their final stop.
+        BaseUrl = Endpoint();
     }
 
     private void Update()
     {
-        if (ToyId == null) return;
+        // Escape belongs to menu navigation, including the priority settings UI.
+        if (Input.GetKeyDown(KeyCode.F8)) TogglePause();
+        if (!CanPlay) return;
+        foreach (var engine in Engines) engine.BeginFrame();
+        _damageSource = Mathf.Max(0, _damageSource - Time.unscaledDeltaTime * 75);
+        if (_damageSource > 0) Continuous(HapticEffect.Damage, _damageSource);
 
-        float dt = Time.deltaTime;
-
-        DamageSource = Mathf.Max(0, DamageSource - dt * DamageDecay);
-        DeathSource  = Mathf.Max(0, DeathSource  - dt * DeathDecay);
-
-        if (Input.GetKeyDown(KeyCode.Escape) && ToyId != null)
-        {
-            ResetSources();
-            _ = SendStop(AllConnectedToys());
-        }
-
-        // when chain expires fire a PatternV2 taper, duration = half chain time, capped
+        if (!HapticSettings.Enabled(HapticEffect.KillChain))
+            _killChainCount = 0;
         if (_killChainCount > 0 && Time.time > _killChainExpiry)
         {
-            float rampDivisor = Mathf.Max(PluginConfig.KillsToMax.Value - 1, 1);
-            int   peakPos     = Mathf.RoundToInt(Mathf.Clamp(Mathf.Pow(100f, (_killChainCount - 1f) / rampDivisor), 0f, 100f));
-            float taperDurationS = Mathf.Min(_killChainCount * PluginConfig.KillChainWindow.Value / 2f, PluginConfig.TaperCap.Value);
-
-            PlayBurst(peakPos, taperDurationS);
-
+            float duration = Mathf.Min(_killChainCount * PluginConfig.KillChainWindow.Value / 2, PluginConfig.TaperCap.Value);
+            Trigger(HapticEffect.KillChain, HapticPattern.Taper(_killChainSource, duration), PluginConfig.EventToyTarget.Value);
             _killChainCount = 0;
-            KillChainSource = 0f;
         }
+        if (_killChainCount > 0) Continuous(HapticEffect.KillChain, _killChainSource);
 
-        float lowHealthSource = 0f;
-        float teleSource      = 0f;
-        float eliteSource     = 0f;
-        float crowdSource     = 0f;
+        if (Run.instance != null) CollectGameSources();
+        else _wasAlive = false;
 
-        if (Run.instance != null)
+        float scale = OutputScale;
+        for (int slot = 0; slot < Engines.Length; slot++)
         {
-            var localBody = LocalUserManager.GetFirstLocalUser()?.cachedBody;
-
-            bool isAlive = localBody != null && localBody.healthComponent?.alive == true;
-            if (_wasAlive && !isAlive && PluginConfig.EnableDeath.Value)
-            {
-                DeathSource      = 20f * PluginConfig.MultDeath.Value;
-                _killChainCount  = 0;
-                KillChainSource  = 0f;
-                _killChainExpiry = 0f;
-            }
-            _wasAlive = isAlive;
-
-            if (PluginConfig.EnableLowHealth.Value && localBody?.healthComponent != null)
-            {
-                float hpFrac    = localBody.healthComponent.combinedHealthFraction;
-                float threshold = PluginConfig.LowHealthThreshold.Value;
-                if (hpFrac < threshold)
-                {
-                    float urgency = 1f - hpFrac / threshold;
-                    float period  = Mathf.Lerp(PluginConfig.HeartbeatSlowPeriod.Value, PluginConfig.HeartbeatFastPeriod.Value, urgency);
-                    float phase   = (Time.time % period) / period;
-                    float beat    = Mathf.Max(PulseAt(phase, 0f, 0.12f), PulseAt(phase, 0.22f, 0.10f) * 0.7f);
-                    lowHealthSource = beat * Mathf.Lerp(6f, 14f, urgency) * PluginConfig.MultLowHealth.Value;
-                }
-            }
-
-            if (PluginConfig.EnableTeleporter.Value)
-            {
-                var tele = TeleporterInteraction.instance;
-                if (tele != null && !tele.isCharged && tele.chargeFraction > 0f)
-                    teleSource = tele.chargeFraction * 15f * PluginConfig.MultTeleporter.Value;
-            }
-
-            if (localBody != null && (PluginConfig.EnableEliteProximity.Value || PluginConfig.EnableCrowdPanic.Value))
-            {
-                Vector3 playerPos       = localBody.corePosition;
-                float   eliteRadius     = PluginConfig.EliteProximityRadius.Value;
-                float   crowdRadius     = PluginConfig.CrowdPanicRadius.Value;
-                float   nearestEliteDist = float.MaxValue;
-                int     enemyCount       = 0;
-
-                foreach (var body in CharacterBody.readOnlyInstancesList)
-                {
-                    if (body == null || body == localBody) continue;
-                    if (body.teamComponent == null || body.teamComponent.teamIndex == TeamIndex.Player) continue;
-                    if (body.healthComponent == null || !body.healthComponent.alive) continue;
-
-                    float dist = Vector3.Distance(playerPos, body.corePosition);
-
-                    if (PluginConfig.EnableEliteProximity.Value && body.isElite && dist < nearestEliteDist)
-                        nearestEliteDist = dist;
-
-                    if (PluginConfig.EnableCrowdPanic.Value && !body.isBoss && dist < crowdRadius)
-                        enemyCount++;
-                }
-
-                if (PluginConfig.EnableEliteProximity.Value && nearestEliteDist < eliteRadius)
-                    eliteSource = Mathf.Lerp(12f, 0f, nearestEliteDist / eliteRadius) * PluginConfig.MultElite.Value;
-
-                if (PluginConfig.EnableCrowdPanic.Value && enemyCount > 0)
-                    crowdSource = Mathf.Min(enemyCount * 2f, 12f) * PluginConfig.MultCrowdPanic.Value;
-            }
-        }
-        else
-        {
-            _wasAlive = false;
-        }
-
-        float diffScale = (PluginConfig.EnableDiffScale.Value && Run.instance != null)
-            ? 1f + Mathf.Log(Mathf.Max(1f, Run.instance.difficultyCoefficient)) * 0.2f
-            : 1f;
-
-        if (Time.time < _patternEndTime)
-        {
-            float t = (Time.time - _taperStartTime) / (_patternEndTime - _taperStartTime);
-            CurrentPercent = Mathf.RoundToInt(Mathf.Lerp(_taperStartPercent, 0f, Mathf.Clamp01(t)));
-            return;
-        }
-        if (_patternEndTime > 0f)
-        {
-            _patternEndTime    = -1f;
-            _lastSentIntensity = -1;
-        }
-
-        float damage    = PluginConfig.EnableDamage.Value    ? DamageSource    * PluginConfig.MultDamage.Value    : 0f;
-        float death     = PluginConfig.EnableDeath.Value     ? DeathSource                                        : 0f;
-        float killChain = PluginConfig.EnableKillChain.Value ? KillChainSource * PluginConfig.MultKillChain.Value : 0f;
-
-        int intensity = Mathf.RoundToInt(
-            Mathf.Clamp((damage + death + killChain + lowHealthSource + teleSource + eliteSource + crowdSource) * diffScale * PluginConfig.MultGlobal.Value, 0f, 20f)
-        );
-
-        CurrentPercent = Mathf.RoundToInt(intensity / 20f * 100f);
-
-        // Fansly: short-lived commands (timeSec=2) + resend every 1.5s lets tips naturally override
-        bool commandExpiring = Time.time - _lastSendTime > 1.5f;
-        if (intensity != _lastSentIntensity || commandExpiring)
-        {
-            _lastSentIntensity = intensity;
-            _lastSendTime      = Time.time;
-            _ = TrySendVibrate(intensity, ResolveToys(PluginConfig.ContinuousToyTarget.Value));
+            var selected = Engines[slot].Select(Now, HapticSettings.Priority, HapticSettings.Enabled);
+            int intensity = selected.Effect.HasValue ? HapticEngine.ToIntensity(selected.Percent,
+                HapticSettings.Multiplier(selected.Effect.Value), scale,
+                HapticSettings.MaximumPercent.Value) : 0;
+            DevicePercent[slot] = intensity * 5;
+            string? toy = slot == 0 ? ToyId : ToyId2;
+            if (!HapticSettings.PreviewOnly.Value && toy != null) Output(toy).Tick(intensity, Now);
         }
     }
 
-    private static float PulseAt(float phase, float start, float width)
+    private static void CollectGameSources()
     {
-        float d = Mathf.Abs(phase - start);
-        d = Mathf.Min(d, 1f - d);
-        return d < width ? 1f - d / width : 0f;
+        var localBody = LocalUserManager.GetFirstLocalUser()?.cachedBody;
+        bool alive = localBody?.healthComponent?.alive == true;
+        if (_wasAlive && !alive)
+        {
+            Trigger(HapticEffect.Death, HapticPattern.Taper(100, 5), PluginConfig.ContinuousToyTarget.Value);
+            _killChainCount = 0;
+        }
+        _wasAlive = alive;
+        if (!alive || localBody == null) return;
+
+        if (PluginConfig.EnableLowHealth.Value)
+        {
+            float threshold = Mathf.Max(0.01f, PluginConfig.LowHealthThreshold.Value);
+            float hp = localBody.healthComponent.combinedHealthFraction;
+            if (hp < threshold)
+            {
+                float urgency = Mathf.Clamp01(1 - hp / threshold);
+                float period = Mathf.Lerp(PluginConfig.HeartbeatSlowPeriod.Value, PluginConfig.HeartbeatFastPeriod.Value, urgency);
+                Continuous(HapticEffect.LowHealth, HapticPattern.HeartbeatSample(Now, period, Mathf.Lerp(30, 70, urgency)));
+            }
+        }
+        var tele = TeleporterInteraction.instance;
+        if (tele != null && !tele.isCharged && tele.chargeFraction > 0)
+            Continuous(HapticEffect.Teleporter, tele.chargeFraction * 75);
+
+        if (!PluginConfig.EnableEliteProximity.Value && !PluginConfig.EnableCrowdPanic.Value) return;
+        float eliteRadius = Mathf.Max(1, PluginConfig.EliteProximityRadius.Value);
+        float crowdRadius = Mathf.Max(1, PluginConfig.CrowdPanicRadius.Value);
+        float nearestElite = float.MaxValue;
+        int enemies = 0;
+        foreach (var body in CharacterBody.readOnlyInstancesList)
+        {
+            if (body == null || body == localBody || body.teamComponent == null
+                || body.teamComponent.teamIndex == TeamIndex.Player || body.healthComponent?.alive != true) continue;
+            float distance = Vector3.Distance(localBody.corePosition, body.corePosition);
+            if (body.isElite) nearestElite = Mathf.Min(nearestElite, distance);
+            if (!body.isBoss && distance < crowdRadius) enemies++;
+        }
+        if (nearestElite < eliteRadius) Continuous(HapticEffect.EliteProximity, Mathf.Lerp(60, 0, nearestElite / eliteRadius));
+        if (enemies > 0) Continuous(HapticEffect.CrowdPanic, Mathf.Min(enemies * 10, 60));
     }
 
-    private void OnGUI() => HapticOverlay.Draw();
+    private static void Continuous(HapticEffect effect, float percent)
+    {
+        if (!HapticSettings.Enabled(effect)) return;
+        // Tiny chains or damage tails that round to zero must not hide an audible effect.
+        // Heartbeat rests deliberately keep their place in the hierarchy.
+        if (effect != HapticEffect.LowHealth && HapticEngine.ToIntensity(percent,
+            HapticSettings.Multiplier(effect), OutputScale, HapticSettings.MaximumPercent.Value) == 0) return;
+        foreach (int slot in ResolveSlots(PluginConfig.ContinuousToyTarget.Value)) Engines[slot].SetContinuous(effect, percent);
+    }
+
+    private static void Trigger(HapticEffect effect, HapticPattern pattern, ToyTarget target)
+    {
+        if (!CanPlay || !HapticSettings.Enabled(effect)) return;
+        foreach (int slot in ResolveSlots(target)) Engines[slot].Trigger(effect, pattern, Now);
+    }
+
+    private static IEnumerable<int> ResolveSlots(ToyTarget target)
+    {
+        bool second = HapticSettings.PreviewOnly.Value || ToyId2 != null;
+        if (target == ToyTarget.Toy2 && second) { yield return 1; yield break; }
+        yield return 0;
+        if (target == ToyTarget.Both && second) yield return 1;
+    }
 
     internal static void OnDamage(float damage, float maxHp, bool isDot)
     {
-        if (!PluginConfig.EnableDamage.Value) return;
-        float add = Mathf.Clamp01(damage / maxHp) * 20f;
-        DamageSource = Mathf.Clamp(DamageSource + (isDot ? add * 0.4f : add), 0f, 20f);
+        if (!CanPlay || !HapticSettings.Enabled(HapticEffect.Damage) || maxHp <= 0) return;
+        _damageSource = Mathf.Clamp(_damageSource + Mathf.Clamp01(damage / maxHp) * 100 * (isDot ? 0.4f : 1), 0, 100);
     }
 
     internal static void OnKill()
     {
-        if (ToyId == null || !PluginConfig.EnableKillChain.Value) return;
-
-        if (Time.time > _killChainExpiry)
-        {
-            _killChainCount  = 0;
-            _killChainExpiry = Time.time;
-        }
-
+        if (!CanPlay || !HapticSettings.Enabled(HapticEffect.KillChain)) return;
+        if (Time.time > _killChainExpiry) { _killChainCount = 0; _killChainExpiry = Time.time; }
         _killChainCount++;
-        _killChainExpiry += PluginConfig.KillChainWindow.Value;
-
-        float rampDivisor = Mathf.Max(PluginConfig.KillsToMax.Value - 1, 1);
-        KillChainSource = Mathf.Min(Mathf.Pow(100f, (_killChainCount - 1) / rampDivisor) * 0.2f, 20f);
-    }
-
-    internal static void ResetSources()
-    {
-        DamageSource = DeathSource = KillChainSource = 0f;
-        _killChainCount    = 0;
-        _killChainExpiry   = 0f;
-        _patternEndTime    = -1f;
-        _lastSentIntensity = -1;
-        _lastSendTime      = 0f;
-        CurrentPercent     = 0;
-    }
-
-    internal static void Connect() => _ = InitAsync();
-
-    internal static void Disconnect()
-    {
-        ToyId  = null;
-        ToyId2 = null;
-        DamageSource = DeathSource = KillChainSource = 0f;
-        _killChainCount    = 0;
-        _killChainExpiry   = 0f;
-        _patternEndTime    = -1f;
-        _lastSentIntensity = -1;
-        _lastSendTime      = 0f;
-        CurrentPercent     = 0;
-        Logger.LogInfo("Lovense disconnected.");
+        // Preserve accumulated chain time from the original mod.
+        _killChainExpiry += Mathf.Max(0.1f, PluginConfig.KillChainWindow.Value);
+        float fraction = Mathf.Min(1, (_killChainCount - 1f) / Mathf.Max(PluginConfig.KillsToMax.Value - 1, 1));
+        _killChainSource = Mathf.Pow(100, fraction);
     }
 
     internal static void OnItemPickup(ItemTier tier)
     {
-        if (ToyId == null || !PluginConfig.EnableItemPickup.Value) return;
-
-        float basePeak = tier switch
+        var pattern = tier switch
         {
-            ItemTier.Tier1 or ItemTier.VoidTier1                                     => 15f,
-            ItemTier.Tier2 or ItemTier.VoidTier2                                     => 30f,
-            ItemTier.Tier3 or ItemTier.VoidTier3 or ItemTier.Boss or ItemTier.VoidBoss => 55f,
-            ItemTier.Lunar                                                            => 45f,
-            _                                                                         => 0f,
+            ItemTier.Tier1 or ItemTier.VoidTier1 => HapticPattern.Pickup(1, 15),
+            ItemTier.Tier2 or ItemTier.VoidTier2 => HapticPattern.Pickup(2, 30),
+            ItemTier.Tier3 or ItemTier.VoidTier3 or ItemTier.Boss or ItemTier.VoidBoss => HapticPattern.Pickup(3, 55),
+            ItemTier.Lunar => HapticPattern.Pickup(2, 45),
+            _ => null,
         };
-        if (basePeak <= 0f) return;
-
-        int peak = Mathf.RoundToInt(Mathf.Clamp(basePeak * PluginConfig.MultItemPickup.Value, 0f, 100f));
-        PlayBurst(peak, 0.6f);
+        if (pattern != null) Trigger(HapticEffect.ItemPickup, pattern, PluginConfig.EventToyTarget.Value);
     }
 
-    private static void OnBossEngageGlobal(TeleporterInteraction _)
-    {
-        if (ToyId == null || !PluginConfig.EnableBossEngage.Value) return;
-        int peak = Mathf.RoundToInt(Mathf.Clamp(60f * PluginConfig.MultBossEngage.Value, 0f, 100f));
-        PlayBurst(peak, 2.5f);
-    }
+    private static void OnBossEngageGlobal(TeleporterInteraction _) =>
+        Trigger(HapticEffect.BossEngage, HapticPattern.Boss(), PluginConfig.EventToyTarget.Value);
 
     private static void OnGameOverGlobal(Run run, GameEndingDef ending)
     {
-        if (ToyId == null || !PluginConfig.EnableVictory.Value || !ending.isWin) return;
-        int peak = Mathf.RoundToInt(Mathf.Clamp(90f * PluginConfig.MultVictory.Value, 0f, 100f));
-        PlayBurst(peak, 4f);
+        if (ending != null && ending.isWin) Trigger(HapticEffect.Victory, HapticPattern.Victory(), PluginConfig.EventToyTarget.Value);
     }
 
-    private static void PlayBurst(int peakPercent, float durationS)
+    internal static void Preview()
     {
-        int taperMs = Mathf.RoundToInt(durationS * 1000f);
-
-        _taperStartTime    = Time.time;
-        _taperStartPercent = peakPercent;
-        _patternEndTime    = Time.time + durationS;
-
-        _ = TrySendPatternV2(new object[]
+        if (!CanPlay) { Logger.LogInfo("Resume feedback and connect, or enable Preview Only, to audition an effect."); return; }
+        HapticEffect effect = HapticSettings.PreviewEffect.Value;
+        HapticPattern pattern = effect switch
         {
-            new { ts = 0,       pos = peakPercent },
-            new { ts = taperMs, pos = 0 },
-        }, ResolveToys(PluginConfig.EventToyTarget.Value));
+            HapticEffect.Damage => HapticPattern.Taper(65, 0.8f),
+            HapticEffect.KillChain => HapticPattern.Taper(80, PluginConfig.TaperCap.Value),
+            HapticEffect.LowHealth => HapticPattern.Heartbeat(PluginConfig.HeartbeatSlowPeriod.Value, 60),
+            HapticEffect.Teleporter => new HapticPattern(3, t => t / 3 * 75),
+            HapticEffect.Death => HapticPattern.Taper(100, 5),
+            HapticEffect.EliteProximity => new HapticPattern(3, t => 60 * (1 - Math.Abs(t - 1.5f) / 1.5f)),
+            HapticEffect.CrowdPanic => new HapticPattern(3, t => 20 * (1 + (int)t)),
+            HapticEffect.ItemPickup => HapticPattern.Pickup(3, 55),
+            HapticEffect.BossEngage => HapticPattern.Boss(),
+            _ => HapticPattern.Victory(),
+        };
+        bool eventRoute = effect == HapticEffect.ItemPickup || effect == HapticEffect.BossEngage || effect == HapticEffect.Victory;
+        Trigger(effect, pattern, eventRoute ? PluginConfig.EventToyTarget.Value : PluginConfig.ContinuousToyTarget.Value);
     }
 
-    private static IEnumerable<string> ResolveToys(ToyTarget target)
+    internal static void TogglePause()
     {
-        if (target == ToyTarget.Toy2 && ToyId2 != null) { yield return ToyId2; yield break; }
-        if (target == ToyTarget.Both)
+        Paused = !Paused;
+        StopAndReset();
+        Logger.LogInfo(Paused ? "Feedback paused. Press F8 to resume." : "Feedback resumed.");
+    }
+
+    internal static void ResetSources() => StopAndReset();
+    internal static void StopAndReset()
+    {
+        _damageSource = _killChainSource = _killChainExpiry = 0;
+        _killChainCount = 0;
+        _wasAlive = false;
+        foreach (var engine in Engines) engine.Clear();
+        Array.Clear(DevicePercent, 0, DevicePercent.Length);
+        _stopTask = Task.WhenAll(new[] { _stopTask }.Concat(Outputs.Values.Select(output => output.StopAsync())).ToArray());
+        Outputs.Clear();
+    }
+
+    private static HapticOutput Output(string toy)
+    {
+        if (!Outputs.TryGetValue(toy, out var output))
         {
-            if (ToyId  != null) yield return ToyId;
-            if (ToyId2 != null) yield return ToyId2;
-            yield break;
+            string url = BaseUrl;
+            output = new HapticOutput(intensity => SendVibrate(url, toy, intensity),
+                error => Logger.LogWarning($"Lovense output failed at {url}: {error}"));
+            Outputs.Add(toy, output);
         }
-        if (ToyId != null) yield return ToyId;
+        return output;
     }
 
-    private static IEnumerable<string> AllConnectedToys()
+    internal static void Connect() => _ = InitAsync();
+    internal static void Disconnect() => _ = DisconnectAsync();
+
+    private static async Task DisconnectAsync()
     {
-        if (ToyId  != null) yield return ToyId;
-        if (ToyId2 != null) yield return ToyId2;
+        int version = ++_connectionVersion;
+        _connectionBusy = true;
+        ConnectionStatus = "Disconnecting";
+        StopAndReset();
+        await _stopTask;
+        if (version != _connectionVersion) return;
+        ToyId = ToyId2 = null;
+        _connectionBusy = false;
+        ConnectionStatus = "Disconnected";
     }
 
     private static async Task InitAsync()
     {
-        _patternEndTime = Time.time + 1.1f;
+        int version = ++_connectionVersion;
+        _connectionBusy = true;
+        ConnectionStatus = "Connecting";
+        StopAndReset();
+        await _stopTask;
+        if (version != _connectionVersion) return;
+        ToyId = ToyId2 = null;
+        string url = BaseUrl;
         try
         {
-            var resp = await SendCommand(new { command = "GetToys" });
-            var toysStr = resp["data"]?["toys"]?.ToString();
-            if (toysStr == null)
-            {
-                _patternEndTime = -1f;
-                Logger.LogError($"Lovense init failed: unexpected response: {resp}");
-                return;
-            }
-            var toys = JObject.Parse(toysStr);
-            var toyNames = toys.Properties().Select(p => p.Name).ToList();
-            if (toyNames.Count == 0)
-            {
-                _patternEndTime = -1f;
-                Logger.LogWarning("Lovense: no toys found. Is the toy connected?");
-                return;
-            }
-            ToyId  = toyNames[0];
-            ToyId2 = toyNames.Count > 1 ? toyNames[1] : null;
-            Logger.LogInfo(ToyId2 != null
-                ? $"Lovense connected: {ToyId} (Toy 1), {ToyId2} (Toy 2)"
-                : $"Lovense connected: {ToyId}");
-
-            await TrySendPatternV2(new object[]
-            {
-                new { ts =   0, pos =   0 },
-                new { ts = 200, pos =  30 },
-                new { ts = 400, pos =  60 },
-                new { ts = 600, pos = 100 },
-                new { ts = 900, pos =   0 },
-            }, AllConnectedToys());
-        }
-        catch (HttpRequestException e)
-        {
-            _patternEndTime = -1f;
-            Logger.LogError($"Lovense: could not reach {BaseUrl} — is Lovense Connect running with Game Mode on? ({e.Message})");
+            var response = await SendCommand(url, new { command = "GetToys" });
+            if (version != _connectionVersion) return;
+            var token = response["data"]?["toys"];
+            var toys = token as JObject ?? JObject.Parse(token?.ToString() ?? "{}");
+            var ids = toys.Properties().Where(p => p.Value["status"]?.ToString() != "0").Select(p => p.Name).Take(2).ToArray();
+            if (ids.Length == 0) throw new InvalidOperationException("No connected devices found.");
+            ToyId = ids[0];
+            ToyId2 = ids.Length > 1 ? ids[1] : null;
+            ConnectionStatus = ids.Length == 2 ? "2 devices connected" : "Connected";
+            Logger.LogInfo("Lovense " + ConnectionStatus + ". Use Preview Effect to test output.");
         }
         catch (Exception e)
         {
-            _patternEndTime = -1f;
-            Logger.LogError($"Lovense init failed: {e}");
+            if (version != _connectionVersion) return;
+            ConnectionStatus = "Connection failed";
+            Logger.LogError($"Lovense connection failed at {url}:\n{e}");
         }
+        finally { if (version == _connectionVersion) _connectionBusy = false; }
     }
 
-    internal static async Task TrySendPatternV2(object[] actions, IEnumerable<string> toys)
+    private static async Task SendVibrate(string url, string toy, int intensity)
     {
-        foreach (var toy in toys)
+        await SendCommand(url, new
         {
-            try
-            {
-                await SendCommand(new { toy, command = "PatternV2", type = "Setup", actions, apiVer = 1 });
-                await SendCommand(new { toy, command = "PatternV2", type = "Play",  apiVer = 1 });
-            }
-            catch (Exception e) { Logger.LogError($"Lovense PatternV2 failed: {e}"); }
-        }
+            toy, command = "Function", action = $"Vibrate:{intensity}",
+            timeSec = 2, loopRunningSec = 0, loopPauseSec = 0, apiVer = 1
+        });
     }
 
-    private static async Task TrySendVibrate(int intensity, IEnumerable<string> toys)
+    private static async Task<JObject> SendCommand(string url, object payload)
     {
-        foreach (var toy in toys)
-        {
-            try { await SendCommand(new
-            {
-                toy, command = "Function", action = $"Vibrate:{intensity}",
-                timeSec = 2, loopRunningSec = 0, loopPauseSec = 0, apiVer = 1
-            }); }
-            catch (Exception e) { Logger.LogWarning($"Lovense vibrate failed: {e.Message}"); }
-        }
-    }
-
-    private static async Task SendStop(IEnumerable<string> toys)
-    {
-        foreach (var toy in toys)
-        {
-            try { await SendCommand(new
-            {
-                toy, command = "Function", action = "Vibrate:0",
-                timeSec = 0, loopRunningSec = 0, loopPauseSec = 0, apiVer = 1
-            }); }
-            catch { }
-        }
-    }
-
-    private static async Task<JObject> SendCommand(object payload)
-    {
-        var json    = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
-        var result  = await Http.PostAsync(BaseUrl, content);
-        var body    = await result.Content.ReadAsStringAsync();
+        var json = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
+        using var content = new StringContent(json, Encoding.UTF8, "application/json");
+        using var result = await Http.PostAsync(url, content);
+        var body = await result.Content.ReadAsStringAsync();
         return JObject.Parse(body);
+    }
+
+    private void OnGUI() => HapticOverlay.Draw();
+    private void OnDestroy()
+    {
+        Disconnect();
+        TeleporterInteraction.onTeleporterBeginChargingGlobal -= OnBossEngageGlobal;
+        Run.onServerGameOver -= OnGameOverGlobal;
+        _harmony?.UnpatchSelf();
+        HapticOverlay.Dispose();
     }
 }

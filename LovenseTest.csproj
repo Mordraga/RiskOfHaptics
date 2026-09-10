@@ -9,13 +9,14 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <GameDir>/mnt/ddrive/SteamLibrary/steamapps/common/Risk of Rain 2</GameDir>
-    <BepInExDir>/home/mordraga/.config/r2modmanPlus-local/RiskOfRain2/profiles/Default/BepInEx</BepInExDir>
+    <GameDir Condition="'$(GameDir)' == ''">/mnt/ddrive/SteamLibrary/steamapps/common/Risk of Rain 2</GameDir>
+    <BepInExDir Condition="'$(BepInExDir)' == ''">/home/mordraga/.config/r2modmanPlus-local/RiskOfRain2/profiles/Default/BepInEx</BepInExDir>
     <ManagedDir>$(GameDir)/Risk of Rain 2_Data/Managed</ManagedDir>
     <PluginDir>$(BepInExDir)/plugins/LovenseRoR2</PluginDir>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs;obj/**/*.cs;bin/**/*.cs" />
     <Reference Include="BepInEx">
       <HintPath>$(BepInExDir)/core/BepInEx.dll</HintPath>
       <Private>false</Private>
@@ -70,7 +71,7 @@
     </Reference>
   </ItemGroup>
 
-  <Target Name="CopyToPlugins" AfterTargets="Build">
+  <Target Name="CopyToPlugins" AfterTargets="Build" Condition="'$(DeployPlugin)' != 'false'">
     <MakeDir Directories="$(PluginDir)" />
     <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(PluginDir)" />
   </Target>
